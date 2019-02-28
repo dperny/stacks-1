@@ -14,6 +14,7 @@ import (
 	stacksRouter "github.com/docker/stacks/pkg/controller/router"
 	"github.com/docker/stacks/pkg/interfaces"
 	"github.com/docker/stacks/pkg/reconciler"
+	"github.com/docker/stacks/pkg/store"
 )
 
 // ServerOptions is the set of options required for the creation of a
@@ -44,9 +45,32 @@ func Server(opts ServerOptions) error {
 	// for validation and conversion purposes.
 	swarmResourceBackend := interfaces.NewSwarmAPIClientShim(dclient)
 
+	// We can access the swarm Resources backend even without changing docker
+	// engine code,
+	//
+	// NOTE(dperny): this is a hack, and there are lots of caveats
+	// * The swarm control socket may not always be located in the assumed
+	//   location
+	// * The client connection we use for the control client may somehow
+	//   timeout or otherwise error, and there is currently no recovery from
+	//   that case.
+	// * The swarm control socket is generally not considered to be part of the
+	//   public API
+	// * The swarm client connection cannot generate events; those must still
+	//   be provided by the stacks shim.
+	// * This will only work on an engine with the latest Swarmkit code
+	//   vendoring. Otherwise, the resources API is not yet available.
+	//
+	// Now, with all that in mind, create a swarmkit control client...
+	cc, err := newControlClient()
+	if err != nil {
+		return err
+	}
+	stackStore := store.New(cc)
+
 	// Create the underlying storage for stacks and swarmstacks as an
 	// in-memory store.
-	stackStore := interfaces.NewFakeStackStore()
+	// stackStore := interfaces.NewFakeStackStore()
 
 	// Create a Stacks API Backend, which includes the API handling logic.
 	stacksBackend := backend.NewDefaultStacksBackend(stackStore, swarmResourceBackend)
