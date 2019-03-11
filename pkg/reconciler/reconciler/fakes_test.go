@@ -35,6 +35,9 @@ type fakeReconcilerClient struct {
 
 	services       map[string]*swarm.Service
 	servicesByName map[string]string
+
+	networks       map[string]*dockerTypes.NetworkResource
+	networksByName map[string]string
 }
 
 // error definitions to reuse
@@ -50,6 +53,8 @@ func newFakeReconcilerClient() *fakeReconcilerClient {
 		stacksByName:   map[string]string{},
 		services:       map[string]*swarm.Service{},
 		servicesByName: map[string]string{},
+		networks:       map[string]*dockerTypes.NetworkResource{},
+		networksByName: map[string]string{},
 	}
 }
 
@@ -132,7 +137,7 @@ func (f *fakeReconcilerClient) CreateService(spec swarm.ServiceSpec, _ string, _
 	defer f.mu.Unlock()
 
 	if err := causeAnError("create", spec.Annotations.Labels); err != nil {
-		return nil, invalidArg
+		return nil, err
 	}
 
 	if _, ok := f.servicesByName[spec.Annotations.Name]; ok {
@@ -201,6 +206,107 @@ func (f *fakeReconcilerClient) RemoveService(idOrName string) error {
 
 	delete(f.services, service.ID)
 	delete(f.servicesByName, service.Spec.Annotations.Name)
+
+	return nil
+}
+
+// GetNetworks returns all networks. It accepts one kind of filter, which is a
+// filter for stack ID. See the doc comment for GetServices.
+func (f *fakeReconcilerClient) GetNetworks(filter filters.Args) ([]dockerTypes.NetworkResource, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var (
+		stackID   string
+		hasFilter bool
+	)
+
+	if filter.Len() != 0 {
+		var ok bool
+		stackID, ok = getStackIDFromLabelFilter(filter)
+		if !ok {
+			return nil, invalidArg
+		}
+		hasFilter = true
+	}
+
+	networks := []dockerTypes.NetworkResource{}
+
+	for _, nw := range f.networks {
+		if hasFilter && nw.Labels[interfaces.StackLabel] != stackID {
+			continue
+		}
+		networks = append(networks, *nw)
+	}
+	return networks, nil
+}
+
+// CreateNetwork creates a network from the given request
+func (f *fakeReconcilerClient) CreateNetwork(nc dockerTypes.NetworkCreateRequest) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := causeAnError("create", nc.NetworkCreate.Labels); err != nil {
+		return "", err
+	}
+
+	if _, ok := f.networksByName[nc.Name]; ok {
+		return "", invalidArg
+	}
+
+	nw := &dockerTypes.NetworkResource{
+		Name:   nc.Name,
+		ID:     f.newID("network"),
+		Scope:  nc.NetworkCreate.Scope,
+		Driver: nc.NetworkCreate.Driver,
+		Labels: nc.NetworkCreate.Labels,
+	}
+
+	f.networks[nw.ID] = nw
+	f.networksByName[nw.Name] = nw.ID
+
+	return nw.ID, nil
+}
+
+// GetNetwork returns a network with the given name or ID
+func (f *fakeReconcilerClient) GetNetwork(name string) (dockerTypes.NetworkResource, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	id := resolveID(f.networksByName, name)
+
+	nw, ok := f.networks[id]
+
+	if !ok {
+		return dockerTypes.NetworkResource{}, notFound
+	}
+
+	if err := causeAnError("get", nw.Labels); err != nil {
+		return dockerTypes.NetworkResource{}, err
+	}
+
+	return *nw, nil
+}
+
+// RemoveNetwork removes a network with the given name or ID
+func (f *fakeReconcilerClient) RemoveNetwork(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	id := resolveID(f.networksByName, name)
+
+	nw, ok := f.networks[id]
+
+	if !ok {
+		return notFound
+	}
+
+	if err := causeAnError("remove", nw.Labels); err != nil {
+		return err
+	}
+
+	delete(f.networksByName, nw.Name)
+	delete(f.networks, nw.ID)
 
 	return nil
 }

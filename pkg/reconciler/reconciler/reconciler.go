@@ -28,6 +28,12 @@ type Client interface {
 	UpdateService(string, uint64, swarm.ServiceSpec, dockerTypes.ServiceUpdateOptions, bool) (*dockerTypes.ServiceUpdateResponse, error)
 	RemoveService(string) error
 
+	// network methods
+	GetNetworks(filters.Args) ([]dockerTypes.NetworkResource, error)
+	GetNetwork(string) (dockerTypes.NetworkResource, error)
+	CreateNetwork(dockerTypes.NetworkCreateRequest) (string, error)
+	RemoveNetwork(string) error
+
 	// TODO(dperny): there's a lot more where this came from, but these are the
 	// parts we need to make this part go
 }
@@ -106,6 +112,48 @@ func (r *reconciler) reconcileStack(id string) error {
 		return r.deleteStack(id)
 	case err != nil:
 		return err
+	}
+
+	// we need to create networks before we create services, because services
+	// will depend on networks
+	for name, network := range stack.Spec.Networks {
+		// try getting the network first, to see if it already exists
+		existingNw, err := r.cli.GetNetwork(name)
+		// not found is good, that means no network yet exists.
+		if errdefs.IsNotFound(err) {
+			// we don't need the ID of the network
+			if _, err := r.cli.CreateNetwork(dockerTypes.NetworkCreateRequest{
+				Name:          name,
+				NetworkCreate: network,
+			}); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			// check if the network matches the spec. this is tricky because
+			// the spec is type NetworkCreate, but the response is type
+			// NetworkResource, and these types are similar but not the same.
+			if !networkMatchesSpec(existingNw, network) {
+				// try deleting the network and recreating it
+				rmErr := r.cli.RemoveNetwork(name)
+				if rmErr != nil {
+					// return the original error that we got, not the error
+					// we got from trying to remove, because the user isn't
+					// trying to remove a network, they're trying to create one
+					return err
+				}
+
+				// if we did remove successfully, recreate the network with the
+				// right options
+				if _, err := r.cli.CreateNetwork(dockerTypes.NetworkCreateRequest{
+					Name:          name,
+					NetworkCreate: network,
+				}); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	for _, spec := range stack.Spec.Services {
@@ -279,4 +327,111 @@ func stackLabelFilter(stackID string) filters.Args {
 	return filters.NewArgs(
 		filters.Arg("label", fmt.Sprintf("%s=%s", interfaces.StackLabel, stackID)),
 	)
+}
+
+// networkMatchesSpec takes an existing network and a desired NetworkCreate,
+// and checks if the existing network fulfills the NetworkCreate
+// TODO(dperny): beat the hell out of this function with actual production
+// values of as many configurations as possible, because this feels super
+// fragile.
+func networkMatchesSpec(existing dockerTypes.NetworkResource, new dockerTypes.NetworkCreate) bool {
+	// this switch with a bunch of fallthroughs is because it feels cleaner and
+	// more readable than a bunch of if statements, or a big boolean expression
+	switch {
+	case existing.Driver != new.Driver:
+		fallthrough
+	case existing.Scope != new.Scope:
+		fallthrough
+	case existing.EnableIPv6 != new.EnableIPv6:
+		fallthrough
+	case existing.Internal != new.Internal:
+		fallthrough
+	case existing.Attachable != new.Attachable:
+		fallthrough
+	case existing.Ingress != new.Ingress:
+		fallthrough
+	case existing.ConfigOnly != new.ConfigOnly:
+		return false
+	}
+
+	if new.ConfigFrom != nil && existing.ConfigFrom.Network != new.ConfigFrom.Network {
+		return false
+	}
+
+	if !reflect.DeepEqual(existing.Options, new.Options) {
+		return false
+	}
+
+	if !reflect.DeepEqual(existing.Labels, new.Labels) {
+		return false
+	}
+
+	// the create may not specify an IPAM, but if it does, validate that it
+	// matches
+	if new.IPAM != nil {
+		if existing.IPAM.Driver != new.IPAM.Driver {
+			return false
+		}
+		if !reflect.DeepEqual(existing.IPAM.Options, new.IPAM.Options) {
+			return false
+		}
+
+		// Ok, so testing equivalency fo IPAM configs is Incredibly Stupid,
+		// because if any fields are left empty from an IPAM config in the
+		// NetworkCreate, they will be filled in with defaults and be present
+		// in the NetworkResource.
+
+		// for starters, if the length of ipam configs in new is 0, then the
+		// length of ipam configs in existing should be 1. Anything else is
+		// bogus.
+		if len(new.IPAM.Config) == 0 && len(existing.IPAM.Config) != 1 {
+			return false
+		}
+
+		// otherwise, the lengths should be equal
+		if len(existing.IPAM.Config) != len(new.IPAM.Config) {
+			return false
+		}
+
+		// now, checking the contents is a huge pain in the ass, because of
+		// defaults. However, IPAMConfig needs at the very least a subnet, so
+		// we're going to establish equivalency using subnets as the primary
+		// key. additionally, if we iterate through existing configs first,
+		// then we can eliminate errors that would result from two identical
+		// configs being present, because such a configuration would not be
+		// valid for existing
+		for _, config := range existing.IPAM.Config {
+			// use the variable found to indicate that we found a matching
+			// config in the existing spec. if we get all the way through the
+			// new config loop and this is still false, there is no matching
+			// config.
+			found := false
+			for _, newConfig := range new.IPAM.Config {
+				if config.Subnet == newConfig.Subnet {
+					found = true
+					// if the newConfig.IPRange was emptystring, we'd expect
+					// the existing config's IP range to be a default value
+					if newConfig.IPRange != "" && newConfig.IPRange != config.IPRange {
+						return false
+					}
+
+					if newConfig.Gateway != "" && newConfig.Gateway != config.Gateway {
+						return false
+					}
+					if len(newConfig.AuxAddress) != 0 && !reflect.DeepEqual(newConfig.AuxAddress, config.AuxAddress) {
+						return false
+					}
+					// break out of the new configs loop, we don't need to
+					// iterate any further.
+					break
+				}
+			}
+
+			if !found {
+				return false
+			}
+		}
+	}
+
+	return true
 }

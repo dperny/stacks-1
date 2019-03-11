@@ -60,6 +60,16 @@ func ConsistOfServices(specs []swarm.ServiceSpec) GomegaMatcher {
 	return WithTransform(serviceSpecs, ConsistOf(specs))
 }
 
+func ConsistOfNetworks(names ...interface{}) GomegaMatcher {
+	return WithTransform(func(f *fakeReconcilerClient) []interface{} {
+		nws := []interface{}{}
+		for name := range f.networksByName {
+			nws = append(nws, name)
+		}
+		return nws
+	}, ConsistOf(names...))
+}
+
 // WTF AM I LOOKING AT AND HOW DOES THIS WORK: A PRIMER ON GINKGO TESTS
 //
 // Ginkgo is a BDD framework. BDD means a lot of things that don't really
@@ -126,11 +136,6 @@ var _ = Describe("Reconciler", func() {
 		// code has executed, the caller can use this to verify the right
 		// objects were called
 		notifier = &fakeObjectChangeNotifier{}
-	})
-
-	BeforeEach(func() {
-		// TODO(dperny): in this initial revision of tests, i'm building the
-		// reconciler by hand, because i don't yet have a mock client to use
 		r = newReconciler(notifier, f)
 	})
 
@@ -169,6 +174,19 @@ var _ = Describe("Reconciler", func() {
 				},
 			)
 
+			stackFixture.Spec.Networks = map[string]dockertypes.NetworkCreate{
+				"net1": dockertypes.NetworkCreate{
+					Labels: map[string]string{
+						interfaces.StackLabel: stackFixture.ID,
+					},
+				},
+				"net2": dockertypes.NetworkCreate{
+					Labels: map[string]string{
+						interfaces.StackLabel: stackFixture.ID,
+					},
+				},
+			}
+
 			// finally, put the stack in the fakeReconcilerClient
 			f.stacksByName[stackFixture.Spec.Annotations.Name] = stackFixture.ID
 			f.stacks[stackFixture.ID] = stackFixture
@@ -183,6 +201,7 @@ var _ = Describe("Reconciler", func() {
 		When("a new stack is created", func() {
 			It("should create all of the objects defined within", func() {
 				Expect(f).To(ConsistOfServices(stackFixture.Spec.Services))
+				Expect(f).To(ConsistOfNetworks("net1", "net2"))
 			})
 			It("should return no error", func() {
 				Expect(err).ToNot(HaveOccurred())
@@ -241,7 +260,7 @@ var _ = Describe("Reconciler", func() {
 			})
 		})
 
-		When("a service for a stack already exist", func() {
+		When("a service for a stack already exists", func() {
 			var (
 				// serviceID is the ID of the service that will already exist
 				serviceID string
@@ -258,6 +277,55 @@ var _ = Describe("Reconciler", func() {
 
 			It("should still create all of the other service", func() {
 				Expect(f).To(ConsistOfServices(stackFixture.Spec.Services))
+			})
+		})
+
+		When("a correct matching network for a stack already exists", func() {
+			BeforeEach(func() {
+				_, err := f.CreateNetwork(dockertypes.NetworkCreateRequest{
+					Name:          "net1",
+					NetworkCreate: stackFixture.Spec.Networks["net1"],
+				})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should return no error", func() {
+				// this "err" refers to the error from calling Reconcile
+				Expect(err).ToNot(HaveOccurred())
+			})
+		})
+
+		When("an incorrect matching network for a stack already exists", func() {
+			var (
+				nwid string
+			)
+
+			BeforeEach(func() {
+				resp, err := f.CreateNetwork(dockertypes.NetworkCreateRequest{
+					Name: "net1",
+					// includes no labels, so is wrong
+				})
+				Expect(err).ToNot(HaveOccurred())
+				nwid = resp
+			})
+
+			It("should try deleting the network and recreating it", func() {
+				nw, err := f.GetNetwork("net1")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(nw.Labels).To(Equal(map[string]string{interfaces.StackLabel: stackID}))
+			})
+
+			When("deleting the network fails", func() {
+				BeforeEach(func() {
+					nw := f.networks[nwid]
+					// we're altering the network AFTER it has been created,
+					// which means setting the invalidarg failure label won't
+					// cause any error until we try to delete
+					nw.Labels = map[string]string{"makemefail": "invalidarg"}
+				})
+				It("should return an error", func() {
+					Expect(err).To(HaveOccurred())
+				})
 			})
 		})
 
