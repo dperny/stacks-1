@@ -95,6 +95,8 @@ func (r *reconciler) Reconcile(kind, id string) error {
 		return r.reconcileStack(id)
 	case events.ServiceEventType:
 		return r.reconcileService(id)
+	case events.NetworkEventType:
+		return r.reconcileNetwork(id)
 	default:
 		// TODO(dperny): what if it's none of these?
 		return nil
@@ -291,6 +293,46 @@ func (r *reconciler) reconcileService(id string) error {
 	return nil
 }
 
+func (r *reconciler) reconcileNetwork(id string) error {
+	// we play it kind of fast and loose, best effort with network operations,
+	// because we can't update a network, and a network can't be removed unless
+	// it is no longer in use.
+	network, err := r.cli.GetNetwork(id)
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	stackID, ok := network.Labels[interfaces.StackLabel]
+	if !ok {
+		// if the network doesn't belong to a stack, nothing to do
+		return nil
+	}
+	// if it does belong to a stack, get the stack
+	stack, err := r.cli.GetSwarmStack(stackID)
+	if errdefs.IsNotFound(err) {
+		// RemoveNetwork will return an error if the network is in use.
+		// However, handling that error is the responsibility of the
+		// dispatcher, not the reconciler.
+		return r.cli.RemoveNetwork(id)
+	}
+	if err != nil {
+		return err
+	}
+
+	// we don't try to update the network. if it already exists, it's done. if
+	// it deviates from the stack spec, there is nothing we can do. just check
+	// if it's still needed. the only way to update it would be to delete it
+	// and recreate it, which is unlikely to succeed in this case.
+	if _, ok := stack.Spec.Networks[network.Name]; !ok {
+		return r.cli.RemoveNetwork(id)
+	}
+
+	return nil
+}
+
 func (r *reconciler) deleteStack(id string) error {
 	// it doesn't matter if the stack is actually deleted or not, so we don't
 	// have to get it from the backend. If it isn't deleted, the services will
@@ -303,6 +345,16 @@ func (r *reconciler) deleteStack(id string) error {
 	}
 	for _, service := range services {
 		r.notify.Notify("service", service.ID)
+	}
+
+	// networks are the same. get them and notify on all of them
+	networks, err := r.cli.GetNetworks(stackLabelFilter(id))
+	if err != nil {
+		return err
+	}
+
+	for _, network := range networks {
+		r.notify.Notify("network", network.ID)
 	}
 	return nil
 }

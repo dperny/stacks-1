@@ -385,6 +385,12 @@ func causeAnError(operation string, labels map[string]string) error {
 	case "invalidarg":
 		// invalidarg simulates an error where some part of the spec is invalid
 		return invalidArg
+	case "inuse":
+		// inuse simulates an error where an object cannot be deleted because
+		// it is in use
+		if operation == "remove" {
+			return invalidArg
+		}
 	}
 
 	return nil

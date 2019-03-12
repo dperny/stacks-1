@@ -175,12 +175,12 @@ var _ = Describe("Reconciler", func() {
 			)
 
 			stackFixture.Spec.Networks = map[string]dockertypes.NetworkCreate{
-				"net1": dockertypes.NetworkCreate{
+				"net1": {
 					Labels: map[string]string{
 						interfaces.StackLabel: stackFixture.ID,
 					},
 				},
-				"net2": dockertypes.NetworkCreate{
+				"net2": {
 					Labels: map[string]string{
 						interfaces.StackLabel: stackFixture.ID,
 					},
@@ -388,10 +388,38 @@ var _ = Describe("Reconciler", func() {
 					},
 				},
 			}
-			// Create some services belonging to a stack
 
+			networks := map[string]dockertypes.NetworkCreate{
+				"net1": {
+					Labels: map[string]string{
+						interfaces.StackLabel: stackFixture.ID,
+					},
+				},
+				"net2": {
+					Labels: map[string]string{
+						interfaces.StackLabel: stackFixture.ID,
+					},
+				},
+				"net3": {
+					Labels: map[string]string{
+						interfaces.StackLabel: "notthisone",
+					},
+				},
+			}
+
+			// Create some services belonging to a stack
 			for _, spec := range specs {
 				_, err := f.CreateService(spec, "", false)
+				Expect(err).ToNot(HaveOccurred())
+			}
+
+			// now, also create some networks that belong to a stack
+			for name, network := range networks {
+				nw := dockertypes.NetworkCreateRequest{
+					Name:          name,
+					NetworkCreate: network,
+				}
+				_, err := f.CreateNetwork(nw)
 				Expect(err).ToNot(HaveOccurred())
 			}
 		})
@@ -405,6 +433,8 @@ var _ = Describe("Reconciler", func() {
 			Expect(notifier.objects).To(ConsistOf(
 				obj("service", f.servicesByName["service1"]),
 				obj("service", f.servicesByName["service3"]),
+				obj("network", f.networksByName["net1"]),
+				obj("network", f.networksByName["net2"]),
 			))
 		})
 	})
@@ -543,6 +573,73 @@ var _ = Describe("Reconciler", func() {
 					Expect(r.stackResources).ToNot(HaveKey("gone"))
 				})
 			})
+		})
+	})
+
+	Describe("reconciling a network", func() {
+		var (
+			nwID string
+		)
+
+		BeforeEach(func() {
+			network := dockertypes.NetworkCreateRequest{
+				Name: "nwName",
+				NetworkCreate: dockertypes.NetworkCreate{
+					Labels: map[string]string{
+						interfaces.StackLabel: stackFixture.ID,
+					},
+				},
+			}
+
+			var err error
+			nwID, err = f.CreateNetwork(network)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should return no error when the stack and network exist", func() {
+			stackFixture.Spec.Networks["nwName"] = dockertypes.NetworkCreate{
+				Labels: map[string]string{
+					interfaces.StackLabel: stackFixture.ID,
+				},
+			}
+			f.stacks[stackID] = stackFixture
+			f.stacksByName[stackName] = stackID
+
+			err := r.Reconcile("network", nwID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(f).To(ConsistOfNetworks("nwName"))
+		})
+
+		It("should delete the network if the stack is deleted", func() {
+			err := r.Reconcile("network", nwID)
+			Expect(err).ToNot(HaveOccurred())
+			// consist of no networks, be empty.
+			Expect(f).To(ConsistOfNetworks())
+		})
+
+		It("should return an error if an error occurs while deleting the network", func() {
+			// get the network object so we can alter it
+			nw := f.networks[nwID]
+			nw.Labels["makemefail"] = "inuse"
+
+			// now try to reconcile. we should get an error
+			err := r.Reconcile("network", nwID)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should delete the network if the stack no longer needs it", func() {
+			// create the stack, but don't add the network to the spec
+			f.stacks[stackID] = stackFixture
+			f.stacksByName[stackName] = stackID
+
+			err := r.Reconcile("network", nwID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(f).To(ConsistOfNetworks())
+		})
+
+		It("should return no error if the network does not exist", func() {
+			err := r.Reconcile("network", "notreal")
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 })
