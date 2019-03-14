@@ -280,55 +280,6 @@ var _ = Describe("Reconciler", func() {
 			})
 		})
 
-		When("a correct matching network for a stack already exists", func() {
-			BeforeEach(func() {
-				_, err := f.CreateNetwork(dockertypes.NetworkCreateRequest{
-					Name:          "net1",
-					NetworkCreate: stackFixture.Spec.Networks["net1"],
-				})
-				Expect(err).ToNot(HaveOccurred())
-			})
-
-			It("should return no error", func() {
-				// this "err" refers to the error from calling Reconcile
-				Expect(err).ToNot(HaveOccurred())
-			})
-		})
-
-		When("an incorrect matching network for a stack already exists", func() {
-			var (
-				nwid string
-			)
-
-			BeforeEach(func() {
-				resp, err := f.CreateNetwork(dockertypes.NetworkCreateRequest{
-					Name: "net1",
-					// includes no labels, so is wrong
-				})
-				Expect(err).ToNot(HaveOccurred())
-				nwid = resp
-			})
-
-			It("should try deleting the network and recreating it", func() {
-				nw, err := f.GetNetwork("net1")
-				Expect(err).ToNot(HaveOccurred())
-				Expect(nw.Labels).To(Equal(map[string]string{interfaces.StackLabel: stackID}))
-			})
-
-			When("deleting the network fails", func() {
-				BeforeEach(func() {
-					nw := f.networks[nwid]
-					// we're altering the network AFTER it has been created,
-					// which means setting the invalidarg failure label won't
-					// cause any error until we try to delete
-					nw.Labels = map[string]string{"makemefail": "invalidarg"}
-				})
-				It("should return an error", func() {
-					Expect(err).To(HaveOccurred())
-				})
-			})
-		})
-
 		When("a service with the stack label exists, but do not belong to a stack", func() {
 			// This case is when some service with the stack label has been
 			// created, but is not actually part of the stack spec. This might
