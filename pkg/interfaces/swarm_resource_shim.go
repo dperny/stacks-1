@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/sirupsen/logrus"
 )
 
 // SwarmResourceAPIClientShim is an implementation of SwarmResourceBackend
@@ -19,7 +20,7 @@ type SwarmResourceAPIClientShim struct {
 
 // NewSwarmAPIClientShim creates a new SwarmResourceAPIClientShim from a
 // client.CommonAPIClient.
-func NewSwarmAPIClientShim(dclient client.CommonAPIClient) SwarmResourceBackend {
+func NewSwarmAPIClientShim(dclient client.CommonAPIClient) *SwarmResourceAPIClientShim {
 	return &SwarmResourceAPIClientShim{
 		dclient: dclient,
 	}
@@ -30,7 +31,11 @@ func (c *SwarmResourceAPIClientShim) Info() swarm.Info {
 	// calls to Info return an error, but there's nothing we can do about that.
 	// because Backend call doesn't. So just return the empty Info object even
 	// if we get an error.
-	info, _ := c.dclient.Info(context.Background())
+	logrus.Info("getting info from shim")
+	info, err := c.dclient.Info(context.Background())
+	if err != nil {
+		logrus.Errorf("error getting info: %v")
+	}
 	return info.Swarm
 }
 

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 
@@ -82,6 +84,7 @@ func (m *Manager) Run() error {
 		// by the closure in the startOnce
 		err error
 	)
+	logrus.Info("trying to run manager")
 	m.startOnce.Do(func() {
 		ran = true
 		// start up a loop, where we wait until we become a leader, and then we
@@ -89,7 +92,11 @@ func (m *Manager) Run() error {
 		// closed
 		for {
 			m.waitReady()
+			logrus.Info("we are the leader, running the manager")
 			err = m.run()
+			if err != nil {
+				logrus.Errorf("manager: error in run: %v", err)
+			}
 			select {
 			case <-m.stop:
 				return
@@ -139,6 +146,15 @@ func (m *Manager) Stop() {
 // leader. it can be safely re-entered any number of times, and it exits when
 // the node has become the leader, or Stop has been called
 func (m *Manager) waitReady() {
+	logrus.Info("waiting for leader status")
+
+	// get the NodeID of this node
+	m.nodeID = m.client.Info().NodeID
+	// first, check if we're already the leader
+	if m.checkLeadership() {
+		return
+	}
+
 	// set up a watch for node events
 	f := filters.NewArgs(filters.Arg("type", events.NodeEventType))
 	_, eventC := m.client.SubscribeToEvents(time.Time{}, time.Time{}, f)
@@ -179,7 +195,10 @@ func (m *Manager) checkLeadership() bool {
 	// we can actually discard the error, because we're only
 	// checking for the existence of a ManagerStatus, which the
 	// default value of swarm.Node will not include
-	n, _ := m.client.GetNode(m.nodeID)
+	n, err := m.client.GetNode(m.nodeID)
+	if err != nil {
+		logrus.Errorf("error getting node: %v", err)
+	}
 	return n.ManagerStatus != nil && n.ManagerStatus.Leader
 }
 
@@ -188,19 +207,20 @@ func (m *Manager) checkLeadership() bool {
 // calls.
 func (m *Manager) checkNodeEventLeadership(ev interface{}) bool {
 	msg, ok := ev.(events.Message)
-	// even though we passed a filter for node events, in the interest
-	// of defensive programming, make sure that's really what this is.
-	//
-	// then, check if this message is an update to THIS node. If it is,
-	// we should see if we've become the leader.
-	return ok &&
-		msg.Type == events.NodeEventType &&
-		msg.Actor.ID == m.nodeID &&
-		m.checkLeadership()
+	// check if this message is an update to THIS node. If it is, we should see
+	// if we've become the leader.
+	if !ok {
+		return false
+	}
+	if msg.Type == events.NodeEventType && msg.Actor.ID == m.nodeID {
+		return m.checkLeadership()
+	}
+	return true
 }
 
 // run is the private method that implements the actual logic of running.
 func (m *Manager) run() error {
+	logrus.Info("running manager")
 	// Using the client, get an events channel. SubscribeToEvents takes a
 	// couple of Time arguments, but we won't use them right now. Instead,
 	// we'll pass a raw time.Time, which is the zero-value. Additionally, to
@@ -210,6 +230,7 @@ func (m *Manager) run() error {
 	// throw away the first return value, it'll be an empty list anyway and we
 	// don't need it.
 	_, eventC := m.client.SubscribeToEvents(time.Time{}, time.Time{}, f)
+
 	// make sure we unsubscribe from events when we're done. I think if we
 	// don't do this, the channel may leak?
 	defer m.client.UnsubscribeFromEvents(eventC)
@@ -242,9 +263,12 @@ func (m *Manager) run() error {
 		// every case where we return from this function should result in the
 		// dispatcherChan being closed, so just stick it in a defer.
 		defer close(dispatcherChan)
+		defer logrus.Info("exiting manager run loop")
 		for {
+			logrus.Info("manager: waiting for events")
 			select {
 			case ev, ok := <-eventC:
+				logrus.Infof("manager: got event (ok %v)", ok)
 				if !ok {
 					// TODO(dperny): what happens if we lose this channel
 					// without asking for it to be shutdown? right now, this
@@ -277,8 +301,10 @@ func (m *Manager) run() error {
 	}()
 	// now, start handling events in the Dispatcher
 	err := m.d.HandleEvents(dispatcherChan)
+	logrus.Info("waiting in manager run")
 	wg.Wait()
 
 	// return whatever error HandleEvents returned.
+	logrus.Info("manager run finished")
 	return err
 }

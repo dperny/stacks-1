@@ -39,10 +39,15 @@ type BackendAPIClientShim struct {
 
 // NewBackendAPIClientShim creates a new BackendAPIClientShim.
 func NewBackendAPIClientShim(dclient client.CommonAPIClient, backend StacksBackend) BackendClient {
+	swarmShim := NewSwarmAPIClientShim(dclient)
 	return &BackendAPIClientShim{
 		dclient:              dclient,
 		StacksBackend:        backend,
-		SwarmResourceBackend: NewSwarmAPIClientShim(dclient),
+		SwarmResourceBackend: swarmShim,
+		SwarmServiceBackend:  swarmShim,
+		SwarmConfigBackend:   swarmShim,
+		SwarmSecretBackend:   swarmShim,
+		SwarmNetworkBackend:  swarmShim,
 		stackEvents:          make(chan events.Message),
 		subscribers:          make(map[chan interface{}]context.CancelFunc),
 	}
@@ -51,19 +56,23 @@ func NewBackendAPIClientShim(dclient client.CommonAPIClient, backend StacksBacke
 // SubscribeToEvents subscribes to the system event stream. The API Client's
 // Events API has no way to distinguish between buffered and streamed events,
 // thus even past are provided through the returned channel.
-func (c *BackendAPIClientShim) SubscribeToEvents(since, until time.Time, ef filters.Args) ([]events.Message, chan interface{}) {
+func (c *BackendAPIClientShim) SubscribeToEvents(_, _ time.Time, ef filters.Args) ([]events.Message, chan interface{}) {
 	ctx, cancel := context.WithCancel(context.Background())
+	logrus.Info("shim: subscribing to events")
 
 	resChan := make(chan interface{})
-	eventsChan, _ := c.dclient.Events(context.Background(), dockerTypes.EventsOptions{
+	eventsChan, errChan := c.dclient.Events(context.Background(), dockerTypes.EventsOptions{
 		Filters: ef,
-		Since:   fmt.Sprintf("%d", since.Unix()),
-		Until:   fmt.Sprintf("%d", until.Unix()),
+		// Since:   fmt.Sprintf("%d", since.Unix()),
+		// Until:   fmt.Sprintf("%d", until.Unix()),
 	})
 
 	go func() {
+		logrus.Info("shim: waiting for events")
 		for {
 			select {
+			case err := <-errChan:
+				logrus.Errorf("shim: error from daemon: %v", err)
 			case event := <-c.stackEvents:
 				resChan <- event
 			case event := <-eventsChan:

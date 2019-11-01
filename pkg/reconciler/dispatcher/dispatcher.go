@@ -116,6 +116,7 @@ func (d *dispatcher) Notify(request *interfaces.ReconcileResource) {
 // HandleEvents will usually deal with errors itself; however, if a
 // serious error occurs, it may return an error indicating this.
 func (d *dispatcher) HandleEvents(eventC chan interface{}) error {
+	logrus.Info("dispatcher: handling events")
 	// HandleEvents is a state machine. It looks like this:
 	//                                           ________
 	//                                          / ______ \
@@ -193,6 +194,12 @@ func (d *dispatcher) resolveMessage(ev interface{}) error {
 	// naked type cast. If this isn't events.Message, then the program will
 	// panic. This is the desired behavior.
 	msg := ev.(events.Message)
+	logrus.WithField(
+		"type", msg.Type,
+	).WithField(
+		"id", msg.Actor.ID,
+	).Infof("got event")
+
 	// and then just call Notify, it's the same code anyway.
 	request, err := NewRequest(msg.Type, msg.Actor.ID)
 	if err != nil {
